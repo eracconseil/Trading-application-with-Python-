@@ -1,0 +1,2 @@
+# Trading-application-with-Python-
+A trading application that downloads stock data from Yahoo Finance, calculates technical indicators (stochastic oscillator and RSI), identifies buy and sell points using the stochastic oscillator, and displays this information on a chart. It uses SQLite to store stock data and the pandas, numpy and yfinance libraries to manipulate the data. It uses the scipy library to calculate technical indicators. Finally, he uses plotly to visualise the data.
