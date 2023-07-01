@@ -1,0 +1,102 @@
+from typing import Final
+import yfinance as yf
+import pandas as pd
+import numpy as np
+import plotly.graph_objects as go
+from scipy.signal import argrelextrema
+from plotly.subplots import make_subplots
+import sqlite3
+from datetime import datetime
+
+# Définir l'échelle de temps
+ECHELLE_TEMPS: Final = '1d'
+
+# Définir le nom de l'action
+ACTION: Final = 'AAPL'
+
+# Définir les indicateurs à activer
+INDICATEURS: Final = ['Stochastique', 'RSI']
+
+# Connexion à la base de données SQLite (ou la crée si elle n'existe pas)
+conn = sqlite3.connect('stocks.db')
+
+# Création de la table si elle n'existe pas
+conn.execute('''
+CREATE TABLE IF NOT EXISTS stock_data (
+    Date DATETIME PRIMARY KEY,
+    Open FLOAT,
+    High FLOAT,
+    Low FLOAT,
+    Close FLOAT,
+    AdjClose FLOAT,
+    Volume INT,
+    Symbol TEXT
+)
+''')
+# Vérification si les données pour cette action existent déjà dans la base de données
+data = pd.read_sql_query(f"SELECT * FROM stock_data WHERE Symbol = '{ACTION}'", conn)
+
+# Si les données n'existent pas, les télécharger depuis Yahoo Finance et les stocker dans la base de données
+if data.empty:
+    print("Téléchargement des cours...")
+    data = yf.download(ACTION, start='2020-01-01', end=datetime.now().strftime('%Y-%m-%d'), interval=ECHELLE_TEMPS)
+    data['Symbol'] = ACTION
+    data = data.rename(columns={"Adj Close": "AdjClose"})
+    data.to_sql('stock_data', conn, if_exists='append')
+else:
+    print("Récupération des cours depuis la base SQL")
+    data = data.set_index('Date')
+
+# Calcul du Stochastic Oscillator
+if 'Stochastique' in INDICATEURS:
+    # On calcule le plus bas sur les 14 dernières périodes
+    low_min = data['Low'].rolling(window=14).min()
+    # On calcule le plus haut sur les 14 dernières périodes
+    high_max = data['High'].rolling(window=14).max()
+    # On calcule %K = (Prix de clôture - Plus bas sur 14 périodes) / (Plus haut sur 14 périodes - Plus bas sur 14 périodes) * 100
+    data['%K'] = (data['Close'] - low_min)/(high_max - low_min) * 100
+    # On calcule %D qui est la moyenne mobile simple sur 3 périodes de %K
+    data['%D'] = data['%K'].rolling(window=3).mean()
+
+# Calcul du RSI
+if 'RSI' in INDICATEURS:
+    # On calcule la différence entre le prix de clôture de la période actuelle et de la période précédente
+    delta = data['Close'].diff()
+    # On ne garde que les augmentations de prix (les baisses de prix sont remplacées par 0)
+    up = delta.clip(lower=0)
+    # On ne garde que les baisses de prix (les augmentations de prix sont remplacées par 0)
+    down = -1*delta.clip(upper=0)
+
+# On calcule la moyenne mobile exponentielle sur 14 périodes des augmentations de prix
+    ema_up = up.ewm(com=13, adjust=False).mean()
+    # On calcule la moyenne mobile exponentielle sur 14 périodes des baisses de prix
+    ema_down = down.ewm(com=13, adjust=False).mean()
+
+# On calcule le rapport de force (RS) = Moyenne mobile exponentielle des augmentations de prix / Moyenne mobile exponentielle des baisses de prix
+    rs = ema_up/ema_down
+    # On calcule le RSI = 100 - (100 / (1 + RS))
+    data['RSI'] = 100 - (100/(1+rs))
+# Recherche des points d'achat et de vente
+# On cherche les points où le %K est au plus bas (points d'achat)
+buy = argrelextrema(np.array(data['%K']), np.less_equal, order=5)
+# On cherche les points où le %K est au plus haut (points de vente)
+sell = argrelextrema(np.array(data['%K']), np.greater_equal, order=5)
+
+# Création du graphique
+fig = make_subplots(rows=3, cols=1, shared_xaxes=True, vertical_spacing=0.02)
+
+# Ajout du cours de l'action au graphique
+fig.add_trace(go.Scatter(x=data.index, y=data['Close'], mode='lines', name='Cours de clôture'), row=1, col=1)
+
+if 'Stochastique' in INDICATEURS:
+    fig.add_trace(go.Scatter(x=data.index, y=data['%K'], mode='lines', name='%K', line=dict(width=0.5, color='blue')), row=2, col=1)
+    fig.add_trace(go.Scatter(x=data.index, y=data['%D'], mode='lines', name='%D', line=dict(width=0.5, color='red')), row=2, col=1)
+
+ fig.add_trace(go.Scatter(x=data.index[buy], y=data.iloc[buy]['%K'], name='Acheter', mode='markers', marker=dict(color='green', size=10, symbol='triangle-up')), row=2, col=1)
+    fig.add_trace(go.Scatter(x=data.index[sell], y=data.iloc[sell]['%K'], name='Vendre', mode='markers', marker=dict(color='red', size=10, symbol='triangle-down')), row=2, col=1)
+
+if 'RSI' in INDICATEURS:
+    fig.add_trace(go.Scatter(x=data.index, y=data['RSI'], mode='lines', name='RSI', line=dict(width=0.5, color='black')), row=3, col=1)
+
+# Affichage du graphique
+fig.show()
